@@ -20,6 +20,7 @@ use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 #[cfg(target_arch = "aarch64")]
 use crate::arch::aarch64::vcpu::get_manufacturer_id_from_host;
 use crate::builder::{self, BuildMicrovmFromSnapshotError};
+use crate::devices::virtio::block::persist::BlockState;
 use crate::cpu_config::templates::StaticCpuTemplate;
 #[cfg(target_arch = "x86_64")]
 use crate::cpu_config::x86_64::cpuid::CpuidTrait;
@@ -424,6 +425,42 @@ pub fn restore_from_snapshot(
             .clone_from(&vsock_override.uds_path);
     }
 
+    // Backport of upstream #6402 (drive_overrides and pmem_overrides) onto 1.18. The MMIO
+    // and PCI transports keep their device states in distinct types with the same fields.
+    macro_rules! apply_backing_file_overrides {
+        ($devices:expr) => {{
+            for entry in &params.drive_overrides {
+                let device = $devices
+                    .block_devices
+                    .iter_mut()
+                    .find(|device| device.device_id == entry.drive_id)
+                    .ok_or(SnapshotStateFromFileError::UnknownBlockDevice)?;
+                match &mut device.device_state {
+                    BlockState::Virtio(state) => state.disk_path.clone_from(&entry.path_on_host),
+                    // vhost-user-block devices cannot be snapshotted; only a crafted snapshot gets here.
+                    BlockState::VhostUser(_) => {
+                        return Err(SnapshotStateFromFileError::VhostUserDrive.into());
+                    }
+                }
+            }
+            for entry in &params.pmem_overrides {
+                $devices
+                    .pmem_devices
+                    .iter_mut()
+                    .find(|device| device.device_id == entry.id)
+                    .ok_or(SnapshotStateFromFileError::UnknownPmemDevice)?
+                    .device_state
+                    .config
+                    .path_on_host
+                    .clone_from(&entry.path_on_host);
+            }
+        }};
+    }
+    match &mut microvm_state.device_states.virtio_state {
+        VirtioDevicesState::Mmio(devices) => apply_backing_file_overrides!(devices),
+        VirtioDevicesState::Pci(devices) => apply_backing_file_overrides!(devices),
+    }
+
     let track_dirty_pages = params.track_dirty_pages;
 
     let vcpu_count = microvm_state
@@ -503,6 +540,12 @@ pub enum SnapshotStateFromFileError {
     UnknownNetworkDevice,
     /// Unknown Vsock Device.
     UnknownVsockDevice,
+    /// Unknown Block Device.
+    UnknownBlockDevice,
+    /// Cannot override the backing file of a vhost-user block device.
+    VhostUserDrive,
+    /// Unknown Pmem Device.
+    UnknownPmemDevice,
 }
 
 fn snapshot_state_from_file(

@@ -20,6 +20,7 @@
     - [Syncing snapshot files](#syncing-snapshot-files)
   - [Resuming the microVM](#resuming-the-microvm)
   - [Loading snapshots](#loading-snapshots)
+    - [Overriding host resources](#overriding-host-resources)
 - [Provisioning host disk space for snapshots](#provisioning-host-disk-space-for-snapshots)
 - [Ensure continued network connectivity for clones](#ensure-continued-network-connectivity-for-clones)
 - [Snapshot security and uniqueness](#snapshot-security-and-uniqueness)
@@ -482,7 +483,9 @@ provided. The disk backing files, network interfaces backing TAPs and/or vsock
 backing socket that were used for the original microVM's configuration should be
 set up and accessible to the new Firecracker process (in which the microVM is
 resumed). These host-resources need to be accessible at the same relative paths
-to the new Firecracker process as they were to the original one.
+to the new Firecracker process as they were to the original one, unless they are
+overridden as described in
+[Overriding host resources](#overriding-host-resources).
 
 **Effects:**
 
@@ -522,6 +525,55 @@ set the `clock_realtime: true` in the `LoadSnapshot` request to advance the
 clock on the guest at restore time (host Linux >= 5.16 is required to support
 this feature). Note that this may cause issues within the guest as the clock
 will appear to suddenly jump.
+
+#### Overriding host resources
+
+If a host resource is at a different location when the snapshot is loaded, for
+example because the snapshot is loaded on a different host or in a different
+jail, the `PUT /snapshot/load` request can override the location recorded in the
+snapshot:
+
+- `network_overrides` sets the host TAP device of network interfaces, as
+  described in
+  [Renaming host device names](network-for-clones.md#renaming-host-device-names).
+- `vsock_override` sets the host Unix domain socket of the vsock device, as
+  described in
+  [Unix Domain Socket Renaming](../vsock.md#unix-domain-socket-renaming).
+- `drive_overrides` sets the backing file of block devices, each identified by
+  its `drive_id`.
+- `pmem_overrides` sets the backing file of [pmem devices](../pmem.md), each
+  identified by its `id`.
+
+For example, to load a snapshot whose drive `rootfs` is now backed by
+`./rootfs_moved.ext4`:
+
+```bash
+curl --unix-socket /tmp/firecracker.socket -i \
+    -X PUT 'http://localhost/snapshot/load' \
+    -H  'Accept: application/json' \
+    -H  'Content-Type: application/json' \
+    -d '{
+            "snapshot_path": "./snapshot_file",
+            "mem_backend": {
+                "backend_path": "./mem_file",
+                "backend_type": "File"
+            },
+            "drive_overrides": [
+                {
+                    "drive_id": "rootfs",
+                    "path_on_host": "./rootfs_moved.ext4"
+                }
+            ]
+    }'
+```
+
+An override only changes where Firecracker finds a resource, so an overriding
+backing file must have the same contents as the device's backing file when the
+snapshot was created. The restored guest still holds the data that it cached
+before the snapshot, and is not notified of any change to the backing file.
+vhost-user block devices do not support snapshots, so they cannot be overridden.
+Loading the snapshot fails if an override targets a device that the snapshot
+does not contain.
 
 ## Provisioning host disk space for snapshots
 
